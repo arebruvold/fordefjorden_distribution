@@ -1,0 +1,523 @@
+---
+title: "Quantitative SEM-EDS Fordefjorden"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(targets)
+library(readxl)
+library(writexl)
+library(GGally)
+library(ggrepel)
+library(RColorBrewer)
+library(factoextra)
+library(patchwork)
+library(see)
+library(NbClust)
+source("scripts/helper.R")
+```
+
+# Data treatment
+```{r}
+aSEM_reader <- function(xls, sheet) {
+  #read in
+  read_excel(
+    xls,
+    sheet = sheet,
+    skip = 6,
+    col_types = "text"
+  ) %>%
+    # clean and format
+    rename_with( ~ str_replace(.x, " ", "_")) %>%
+    select(Particle,
+           Area,
+           Length,
+           Width,
+           Aspect_Ratio,
+           Equivalent_Diameter,
+           Equivalent_Diameter,
+           matches("\\b\\w{1,2}\\b")) %>%
+    mutate(across(-1, ~ as.numeric(.x))) %>%
+    mutate(across(everything(), ~ replace_na(.x, 0)))
+}
+
+sp_addcluster_new <- function(in_df, cols, n_clusters = 0, vis = FALSE, npc = TRUE) {
+  # cols selects columns used for clustering
+  # if n_clusters == 0, shows optimal cluster number using three different methods.
+  # otherwise performs kmeans clustering and adds the clusters to the data. Outputs either clustered data (vis == FALSE),
+  # or plots of cluster compositions (vis == TRUE). NPC annotates n per cluster to output plot.
+  
+  set.seed(123)
+  df <- in_df %>% select(matches(cols))
+  
+  if (n_clusters == 0) {
+    p1 <- fviz_nbclust(df, kmeans, "silhouette", nboot = 500, k.max = 14)
+    p2 <- fviz_nbclust(df, kmeans, "gap", nboot = 500, k.max = 14)
+    p3 <- fviz_nbclust(df, kmeans, "wss", nboot = 500, k.max = 14)
+    p1 + p2 + p3 + plot_annotation(caption = 'Different methods for determining optimal cluster size.',
+                                   theme = theme(plot.title = element_text(size = 18)))
+  }
+  else {
+    
+    
+    km.clusters <- kmeans(df,
+                          n_clusters,
+                          nstart = 100)$cluster %>%
+      as_factor() %>%
+      as_tibble() %>%
+      rename(cluster = value)
+    
+    km.clusters <-
+      cbind(in_df, km.clusters) %>% group_by(cluster) %>%
+      mutate(n_per_clust = n()) %>% ungroup()
+    
+    if (vis == FALSE){
+      
+      km.clusters
+      
+    } else {
+      
+      p_out <- km.clusters %>% group_by(cluster) %>%
+        pivot_longer(
+          cols = matches("\\b\\w{1,2}\\b"),
+          names_to = "element",
+          values_to = "prop"
+        ) %>% ungroup() %>%
+        ggplot(aes(element, prop)) +
+        geom_boxplot() +
+        facet_wrap(~ cluster) +
+        theme_bw() +
+        theme(legend.position = "top")
+      
+      if (npc == TRUE) {
+        p_out + geom_text(
+      x = -Inf, y = Inf, hjust = 0, vjust = 1,
+      aes(label = paste(" n = ", n_per_clust)), check_overlap = TRUE
+    )
+      } else {
+        p_out
+      }
+    
+     }
+  }
+}
+
+dataset <- "files_imgs/sjovann_partikler_noytral.xls"
+
+dataset_small <- "files_imgs/sjovann_minste_partikler_2.xls"
+
+ASEM_full <-
+  aSEM_reader(dataset
+    ,
+    6
+  )
+
+ASEM_small <- aSEM_reader(dataset_small
+    ,
+    6)
+```
+
+# Methods
+Dataset `r paste(dataset)` was used throughout, whereas `r paste(dataset_small)` was tested and resulted in lower sizes, yet still not abundant <250 nm particles. "Atomic % (norm)" data, sheet 6 in the excel file was used. (Total column was removed from raw data sheets "Wt % (norm.)" and "Atomic % (norm.) for consistency in the formatting of data during data exploration).
+
+# Results and discussion
+
+```{r cleaning}
+# Removing O,C,Pt, removing particles that consisted only of these, then rescale, and remove particles below 1.5 um.
+ASEM_clean <-
+  ASEM_full %>%
+  select(-O,-C,-Pt) %>%
+  filter(Equivalent_Diameter < 1.5) %>% 
+  rowwise() %>%
+  #selecting only the count variables in which more than trace levels present
+  filter(mean(c_across(matches("\\b\\w{1,2}\\b"))) > 0) %>%
+  ungroup() %>%
+  rowwise() %>%
+  #rescale appropriate variables
+  mutate(across(matches("\\b\\w{1,2}\\b"), ~ .x / sum(c_across(
+    matches("\\b\\w{1,2}\\b")
+  )))) %>% ungroup() %>%
+  filter(Na + Cl < 0.5, Cr < 0.5, Ni < 0.5) %>%
+  select(-any_of(c("Cr", "Mo", "Ni", "P", "Pb", "S", "Zr")))
+
+ASEM_clean_small <-
+  ASEM_small %>%
+  select(-O,-C,-Pt) %>%
+  filter(Equivalent_Diameter < 1.5) %>% 
+  rowwise() %>%
+  #selecting only the count variables in which more than trace levels present
+  filter(mean(c_across(matches("\\b\\w{1,2}\\b"))) > 0) %>%
+  ungroup() %>%
+  rowwise() %>%
+  #rescale appropriate variables
+  mutate(across(matches("\\b\\w{1,2}\\b"), ~ .x / sum(c_across(
+    matches("\\b\\w{1,2}\\b")
+  )))) %>% ungroup() %>%
+  filter(Na + Cl < 0.5, Cr < 0.5) %>% 
+  select(-any_of(c("Cr", "Mo", "Ni", "P", "Pb", "S", "Zr")))
+```
+
+## Overall size and atomic proportions
+
+```{r proportions-total} 
+#pivot appropriate vars for plot
+p1 <- ASEM_clean %>%
+  pivot_longer(
+    cols = matches("\\b\\w{1,2}\\b"),
+    names_to = "element",
+    values_to = "prop"
+  ) %>% ungroup() %>%
+  # remove zeros for visibility of plot, minor elements
+  filter(prop > 0) %>%
+  ggplot(aes(x = element, y = prop)) +
+  geom_violindot(
+    fill_dots = "black",
+    size_dots = 0.2,
+    scale = "count",
+    binwidth = 0.02,
+    width = 2.5,
+    fill = "grey"
+  ) +
+  labs(x = "Element", y = "Atomic proportion") +
+  scale_fill_brewer(palette = "Paired") +
+  theme_bw() + theme(legend.position = "none")+
+    geom_text_repel(
+      data = ASEM_clean %>%
+        pivot_longer(
+          cols = matches("\\b\\w{1,2}\\b"),
+          names_to = "element",
+          values_to = "prop"
+        ) %>% filter(prop < 0.8, prop > 0) %>% group_by(element) %>%
+        mutate(n_nps = n()) %>% distinct(prop %>% round(digits = 1), .keep_all = TRUE) %>% 
+        filter(prop == quantile(prop, 0.9, type = 1)),
+      aes(label = paste("n = ", n_nps, sep = ""), hjust = 0, vjust = 0, angle = 90), #nudge_x = 0.58,
+      size = 3.5,
+      ylim = c(0.3,0.76),
+      segment.alpha = 0
+    )
+  
+
+p2 <- ASEM_clean %>% filter(Equivalent_Diameter < 1.5) %>%
+  mutate(Equivalent_Diameter = Equivalent_Diameter * 1000) %>%
+  ggplot(aes(Equivalent_Diameter)) + geom_histogram(binwidth = 100, color = "black") +
+  scale_x_continuous(breaks = seq(200, 1500, by = 100)) +
+  theme_bw() +
+  labs(x = expression(paste("Equivalent diameter [nm]", sep = "")), y = "Frequency [#]") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  
+  p1+p2+plot_layout(widths = c(1.3, 1))
+  
+  ggsave(filename = "out/SEM/fig8-A-B-ASEM-proportion-size.tiff", width = 18, height = 7, device='tiff', dpi=300, units = "cm")
+  
+  
+```
+
+Thus, Al is the most homogenous population among elements, mainly around 0.15-0.2 atomic proportion. Fe as major constituent (iron oxides) and lesser in many particles. Mn as manganese oxides and minor fraction. Also number of Ca-particles, not measured on sp-ICP-MS.
+
+## Scatter plots
+
+All elements in cleaned dataset:
+
+```{r scatter-si}
+ASEM_clean %>%
+  select(matches("\\b\\w{1,2}\\b"), Particle) %>%
+  pivot_longer(
+    cols = matches("\\b\\w{1,2}\\b"),
+    names_to = "element",
+    values_to = "prop"
+  ) %>%
+  full_join(., ., by = "Particle") %>%
+  rename(c(x = prop.x, y = prop.y)) %>%
+  mutate(xy = x + y,
+         xy = if_else(element.x == element.y, xy / 2, xy)) %>%
+  # filter(element.x != element.y) %>%
+  ggplot(aes(x = y, y = x, color = xy)) +
+  geom_point(size = 1) +
+  facet_grid(element.x ~ element.y, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.5), limits = c(0, 1)) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.5), limits = c(0, 1)) +
+  labs(x = "Atomic proportion x", y = "Atomic proportion y") +
+  scale_color_gradient(
+   low = "lightblue", high = "black",
+   guide = guide_colourbar(
+     frame.colour = "black"
+   )
+ ) +
+  labs(colour = "x + y")
+
+```
+
+Relevant elements, to paper:
+
+```{r scatter}
+ASEM_clean %>% filter(Si > 0 |
+                        Fe > 0 | Al > 0 | Mn > 0) %>%
+  select(Si, Fe, Al, Mn, Particle) %>%
+  pivot_longer(
+    cols = matches("\\b\\w{1,2}\\b"),
+    names_to = "element",
+    values_to = "prop"
+  ) %>%
+  full_join(., ., by = "Particle") %>%
+  # filter(element.x != element.y) %>%
+  rename(c(x = prop.x, y = prop.y)) %>%
+  mutate(xy = x + y,
+         xy = if_else(element.x == element.y, xy / 2, xy)) %>%
+  # filter(element.x != element.y) %>%
+  ggplot(aes(x = y, y = x, color = xy)) +
+  geom_point(size = 1) +
+  facet_grid(element.x ~ element.y, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.25), limits = c(0, 1)) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.25), limits = c(0, 1)) +
+  labs(x = "Atomic proportion x", y = "Atomic proportion y") +
+  scale_color_gradient(
+   low = "lightblue", high = "black",
+   guide = guide_colourbar(
+     frame.colour = "black"
+   )) +
+  labs(colour = "x + y")
+# mutate(across(.cols = matches("\\b\\w{1,2}\\b"), .fn = ~ na_if(.x, 0))) %>%
+ ggsave(filename = "out/SEM/fig9-ASEM-scatter.tiff", width = 15, height = 12, device='tiff', dpi=300, units = "cm")
+
+```
+
+* x+y is the sum of different elements indicated.
+* Al and Si are strongly correlated. Al does not occur without Si! K never without Si, (K almost always with Al and Si).
+* Mn no correlation with Si or Al, but Fe.
+* Fe correlated to Si, Mn, Al, but also alone.
+* Si associated with all elements.
+
+## SP-ICP-MS vs SEM: Aluminium
+
+Only including `r ASEM_clean %>% filter(Equivalent_Diameter < 1.5) %>% select(Al, Si, Fe, Mn, Ca, K, Mg) %>% filter(Si > 0 | Fe > 0 | Al > 0 | Mn > 0 | Ca > 0 | Mg > 0 | K > 0) %>% filter(Al > 0) %>% nrow()` Al-containing particles  gives the scatter plot:
+  
+```{r}
+ASEM_al <- ASEM_clean %>% filter(Al > 0)
+
+# ASEM_al%>% ggpairs()+theme_bw()
+
+ASEM_al %>% 
+  pivot_longer(
+    cols = matches("\\b\\w{1,2}\\b"),
+    names_to = "element",
+    values_to = "prop"
+  ) %>%
+  full_join(., ., by = "Particle") %>%
+  rename(c(x = prop.x, y = prop.y)) %>%
+  mutate(xy = x + y,
+         xy = if_else(element.x == element.y, xy / 2, xy)) %>%
+  # filter(element.x != element.y) %>%
+  ggplot(aes(x = y, y = x, color = xy)) +
+  geom_point(size = 1) +
+  facet_grid(element.x ~ element.y, scales = "free") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.5), limits = c(0, 1)) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.5), limits = c(0, 1)) +
+  labs(x = "Atomic proportion x", y = "Atomic proportion y") +
+    scale_color_gradient(
+   low = "lightblue", high = "black",
+   guide = guide_colourbar(
+     frame.colour = "black"
+   )) +
+  labs(colour = "x + y")
+```
+
+Linear relationship between Si and K. Furthermore, Al-containing particles all have Si, with Si:Al ratios mostly 2.1 +-1:
+
+```{r, include = FALSE}
+ASEM_clean %>% filter(Al > 0) %>% ggplot(aes(Si/Al))+geom_histogram(binwidth = 0.1)+scale_x_continuous(breaks = seq(0,5, by = 0.2), limits = c(0.5,4))+ theme_bw()+theme(axis.text.x = element_text(angle = 90))
+
+```
+
+
+Al-containing particles are aluminum silicates. The Al:Si ratio is consistent with alkali feldspars such as orthoclase, which are the most abundant crustal mineral, and also dominant in the greywacke sandstone of the area.
+
+Assuming the composition of orthoclase or anorthoclase (Na,K)AlSi~3~O~8~ yields the following size distribution for n = `r tar_read(size_dists_large) %>% filter(isotope == "Al", depth == 530, station == "Outer", measurement == 1) %>% nrow()` Al-particles as determined by SP-ICP-MS. The SEM data of `r ASEM_clean %>% filter(Al > 0) %>% nrow()` Al-containing particles yields the size distribution: 
+
+```{r SEM-v-SP-Al}
+p1 <- tar_read(size_dists_large) %>%
+  filter(isotope == "Al", depth == 530, station == "Outer", measurement == 1) %>%
+  # mutate(measurement = str_extract(sample_name, "m\\d")) %>%
+  ggplot(aes(size_nm)) +
+  geom_histogram(breaks = seq(50, 1550, by = 100), color = "black") +
+  scale_x_continuous(breaks = seq(0, 1500, by = 100)) +
+  theme_bw() + mytheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "Diameter [nm]", y = "Frequency [#]")
+
+p2 <- ASEM_clean %>% filter(Al > 0) %>%
+  mutate(Equivalent_Diameter = Equivalent_Diameter * 1000) %>%
+  ggplot(aes(Equivalent_Diameter)) +
+  geom_histogram(breaks = seq(50, 1550, by = 100), color = "black")+
+scale_x_continuous(breaks = seq(0, 1500, by = 100)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = expression(paste("Equivalent diameter [nm]", sep = "")),
+       y = "Frequency [#]") +
+  theme_bw()+mytheme+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p3 <- ASEM_clean_small %>% filter(Al > 0) %>%
+  mutate(Equivalent_Diameter = Equivalent_Diameter * 1000) %>%
+  ggplot(aes(Equivalent_Diameter)) +
+  geom_histogram(breaks = seq(50, 1550, by = 100), color = "black")+
+scale_x_continuous(breaks = seq(0, 1500, by = 100)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = expression(paste("Equivalent diameter [nm]", sep = "")),
+       y = "Frequency [#]") +
+  theme_bw()+mytheme+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p1+p2
+
+  ggsave(filename = "out/SEM/fig10-SP-ICP-v-SEM_Al-dia.tiff", width = 17, height = 6, device='tiff', dpi=300, units = "cm")
+
+```
+
+```{r}
+# KS test
+ks_ASEM <- ASEM_clean %>%
+  filter(Al > 0) %>%
+  mutate(Equivalent_Diameter = Equivalent_Diameter * 1000) %>% arrange(desc(Equivalent_Diameter))
+
+ks_SP <- tar_read(size_dists_large) %>%
+  filter(isotope == "Al", depth == 530, station == "Outer", measurement == 1) %>%
+  mutate(Equivalent_Diameter = size_nm) %>% arrange(desc(Equivalent_Diameter))
+
+ks.test(ks_ASEM$Equivalent_Diameter, ks_SP$Equivalent_Diameter,
+  alternative = "two.sided"
+)
+
+```
+
+
+Size effect of filter and magnification:
+
+```{r}
+  aSEM_reader(
+    "~/OneDrive - Havforskningsinstituttet/Are Marine Nanoparticles/Paper_1_SW/SEM/211214_small_particles/sjøvann minste partikler 2.xls",
+    6
+  ) %>%
+  select(-O,-C,-Pt) %>%
+  filter(Equivalent_Diameter < 1.5, Al > 0) %>%
+  rowwise() %>%
+  #selecting only the count variables in which more than trace levels present
+  filter(mean(c_across(matches("\\b\\w{1,2}\\b"))) > 0) %>%
+  ungroup() %>%
+  rowwise() %>%
+  #rescale appropriate variables
+  mutate(across(matches("\\b\\w{1,2}\\b"), ~ .x / sum(c_across(
+    matches("\\b\\w{1,2}\\b")
+  )))) %>% ungroup() %>% 
+  filter(Na + Cl < 0.5, Cr < 0.5) %>%
+    mutate(Equivalent_Diameter = Equivalent_Diameter*1000) %>% 
+    ggplot(aes(Equivalent_Diameter))+
+    geom_histogram(breaks = seq(50, 1550, by = 100), color = "black")+
+scale_x_continuous(breaks = seq(0, 1500, by = 100)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = expression(paste("Equivalent diameter [nm]", sep = "")),
+       y = "Frequency [#]", caption = "200 nm pore size, higher magnification.") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  theme_bw()
+```
+
+
+## Clusters
+
+Using K-means clustering on `r ASEM_clean %>% nrow()` particles.
+
+```{r cluster-diag}
+#checking optimal cluster size, silhouette & gap
+sp_addcluster_new(ASEM_clean, cols = "\\b\\w{1,2}\\b", n_clusters = 0)
+
+#optional method, multiple methods:
+# nb <- NbClust(ASEM_small_all_el %>% select(matches("\\b\\w{1,2}\\b")), distance = "euclidean", min.nc = 4,max.nc = 13, method = "kmeans", )
+
+```
+
+Optimal cluster size appear to be 5.   
+
+```{r cluster}
+
+#adding clusters
+ASEM_clustered <- sp_addcluster_new(ASEM_clean, cols = "\\b\\w{1,2}\\b", n_clusters = 5)
+
+```
+
+### Overall   
+Removed the least influencing elements for visualization.
+
+```{r}
+p1 <- sp_addcluster_new(ASEM_clean, cols = "\\b\\w{1,2}\\b", n_clusters = 5, vis = TRUE, npc = TRUE)+theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))+labs(x = "Element", y = "Atomic proportion")
+
+p1
+
+ggsave(filename = "out/SEM/si-fig11-overall_clust.tiff", width = 18, height = 9, device='tiff', dpi=300, units = "cm")
+
+
+```
+
+NaCl still abundant. Dominant clusters are silicates, Mn-oxides, Fe-oxides, Ca(Co3?) and Ca heteroaggregates/precipitates.
+
+### Aluminum
+Orthoclase: KAlSi3O8, density = 2.56. Mass fraction = 0.09694248
+(Gibbsite, Al(OH)3, density = 2.42. Mass fraction = 0.3459231)
+
+```{r}
+
+ASEM_al_clustered <- sp_addcluster_new(ASEM_al, cols = "\\b\\w{1,2}\\b", n_clusters = 4)
+
+
+sp_addcluster_new(ASEM_al, cols = "\\b\\w{1,2}\\b", n_clusters = 4, vis = TRUE)
+
+# cluster 1 and 3 dominant
+ASEM_al_clustered %>% group_by(cluster) %>% summarise(
+  n_per_clust = n(),
+  meanSi = mean(Si)/mean(Al),
+  meanAl = mean(Al)/mean(Al),
+  meanK = mean(K)/mean(Al),
+  meanKNa = ((mean(K) + mean(Na) + mean(Ca) - mean(Cl)))/mean(Al)
+)
+```
+No clear mineral classification possible, yet dominant 1 & 3 clusters are consistent with mixed phases or aggregates of feldspars.
+
+## SP-ICP-MS vs SEM: Abundance
+
+```{r}
+tar_read(summarized) %>%
+  filter(
+    station == "Outer", measurement == "1", sampling == "Neutral", depth == 530,
+    isotope %in% c("Al", "Fe", "Mn", "Si")
+  ) %>%
+  select(isotope, n_particles) %>%
+  rename(c(element = isotope)) %>%
+  mutate(Method = "SEM-EDS") %>%
+  bind_rows(ASEM_clean %>%
+    pivot_longer(
+      cols = matches("\\b\\w{1,2}\\b"),
+      names_to = "element",
+      values_to = "prop"
+    ) %>%
+    ungroup() %>%
+    # remove zeros for visibility of plot, minor elements
+    filter(prop > 0) %>%
+    group_by(element) %>%
+    summarise(n_particles = n()) %>%
+    filter(element %in% c("Al", "Fe", "Mn", "Si")) %>%
+    mutate(Method = "SP-ICP-MS")) %>%
+  pivot_wider(names_from = element, values_from = n_particles) %>%
+  select(Method, Al, Fe, Mn, Si) %>%
+  write_xlsx("out/SEM-v-SP_nparticles.xlsx")
+
+```
+
+

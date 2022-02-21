@@ -1,0 +1,1489 @@
+---
+title: "Distribution of nanoparticles and trace elements in a Norwegian fjord"
+output:
+  bookdown::pdf_document2:
+    latex_engine: xelatex
+    theme: journal
+    code_folding: hide
+editor_options:
+  markdown:
+    wrap: 150
+always_allow_html: yes
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  message = FALSE,
+  echo = FALSE,
+  warning = FALSE
+)
+
+library(kableExtra)
+library(knitr)
+library(ggmap)
+library(shadowtext)
+library(ggrepel)
+library(DHARMa)
+library(see)
+library(GGally)
+library(ggridges)
+library(patchwork)
+library(gt)
+library(ggh4x)
+library(targets)
+library(readxl)
+library(broom)
+library(MASS)
+library(tidyverse)
+tar_unscript()
+
+source("scripts/spFunctions_smoothbaseline.R")
+source("scripts/helper.R")
+
+
+nparticle_glm_nparticles <- function(df) {
+  glm.nb(
+    data = df,
+    formula = n_particles ~ depth + station + sampling + measurement
+  )
+}
+
+select <- dplyr::select
+filter <- dplyr::filter
+
+#densities and compositions
+dens_comps_large <- read_csv("files_imgs/dens_comps_large.csv")
+dens_comps_small <- read_csv("files_imgs/dens_comps_small.csv")
+
+```
+
+
+```{targets globals, tar_globals = TRUE}
+options(tidyverse.quiet = TRUE)
+tar_option_set(
+  packages = c(
+    "tictoc",
+    "GGally",
+    "gt",
+    "MASS",
+    "tidyverse",
+    "furrr",
+    "zoo",
+    "see",
+    "ggridges",
+    "beepr",
+    "DHARMa",
+    "knitr",
+    "bookdown",
+    "ggrepel",
+    "ggmap",
+    "ggh4x",
+    "kableExtra",
+    "ggmap",
+    "shadowtext",
+    "patchwork",
+    "readxl"
+  )
+)
+
+smpl_regex <-
+  '^F[[:digit:]]-[[:digit:]]\\w'#"^[^_]{1,5}_" #to recognize sample grouping
+blk_regex <-
+  '^PrB' #regex to recognize blanks for LOD/LOQ + mean blk subtr.
+rm_regex <- "AuRM"
+
+# Load functions ####
+
+source("scripts/spFunctions_smoothbaseline.R")
+source("scripts/helper.R")
+
+
+nparticle_glm_nparticles <- function(df) {
+  glm.nb(
+    data = df,
+    formula = n_particles ~ depth + station + sampling + measurement
+  )
+}
+select <- dplyr::select
+filter <- dplyr::filter
+
+dens_comps_large <- read_csv("files_imgs/dens_comps_large.csv")
+dens_comps_small <- read_csv("files_imgs/dens_comps_small.csv")
+```
+
+
+```{targets processing}
+list(
+  #count raws
+  tar_target(F_spdata_folder, "~/sp-data/Fordefjorden/"),
+  #processed/ integrated count raws
+  tar_target(
+    processed,
+    F_spdata_folder %>% nParticle_finder_blocks(prop = 1)
+  ),# not in paper
+  tar_target(
+    mean_baselines,
+    processed %>% group_by(isotope, sample_name) %>% summarise(mean_baseline = mean(baseline)) %>%
+      filter(!(
+        isotope == "Fe" & str_detect(sample_name, "F2-6N_m2")
+      )) %>%
+      mutate(
+        smpl_grp =
+          case_when(
+            str_detect(sample_name, smpl_regex) ~
+              str_extract(sample_name, smpl_regex),
+            str_detect(sample_name, blk_regex) ~
+              str_extract(sample_name, blk_regex),
+            str_detect(sample_name, rm_regex) ~
+              str_extract(sample_name, rm_regex),
+            str_detect(sample_name, "\\d{1,3}[A-Z]{1}[a-z]{1}") &
+              str_detect(sample_name, "[A-Z]{1}[a-z]{1}") ~
+              "ion_std"
+          ),
+        .before = 1
+      ) %>%
+      
+      mutate(
+        measurement =
+          case_when(
+            str_detect(sample_name, '\\_m1') ~ 1,
+            str_detect(sample_name, '\\_m2') ~ 2,
+            str_detect(sample_name, '\\_m3') ~ 3,
+            TRUE ~ NA_real_
+          )
+      ) %>%
+      mutate(measurement = as.numeric(measurement)) %>%
+      mutate(
+        sampling = case_when(
+          smpl_grp %>% str_detect('\\-\\dN') ~ 'Neutral',
+          smpl_grp %>% str_detect('\\-\\dA') ~ 'Acidified',
+          smpl_grp %>% str_detect(blk_regex) ~ 'Blk',
+          TRUE ~ NA_character_
+        )
+      ) %>% # add depth groupings
+      mutate(
+        depth = case_when(
+          str_detect(smpl_grp, '\\-2') ~ 200,
+          str_detect(smpl_grp, '\\-3') ~ 100,
+          str_detect(smpl_grp, '\\-4') ~ 50,
+          str_detect(smpl_grp, '\\-5') ~ 20,
+          str_detect(smpl_grp, '\\-6') ~ 10,
+          str_detect(smpl_grp, "F2\\-1") ~ 336,
+          str_detect(smpl_grp, "F4\\-1") ~ 530,
+          TRUE ~ NA_real_
+        )
+      ) %>% # add location groupings
+      mutate(
+        station = case_when(
+          str_detect(smpl_grp, '^F2') ~ 'Inner',
+          str_detect(smpl_grp, '^F4') ~ 'Outer',
+          TRUE ~ NA_character_
+        )
+      )
+  ),
+  #size calibration
+  tar_target(
+    calibrated,
+    processed %>% signal_conc_calibration(
+      dens_comps = dens_comps_small,
+      RM_datafile = "008_RM",
+      RM_dia = 60,
+      supp_coef = 1/0.515
+    ) %>% dplyr::select(-c(
+      coef_b, density, element_fraction, dataset
+    ))
+    %>%
+      #adding sample groupings
+      mutate(
+        smpl_grp =
+          case_when(
+            str_detect(sample_name, '^F[[:digit:]]-[[:digit:]]\\w') ~
+              str_extract(sample_name, '^F[[:digit:]]-[[:digit:]]\\w'),
+            str_detect(sample_name, '^PrB') ~
+              str_extract(sample_name, '^PrB'),
+            str_detect(sample_name, 'AuRM') ~
+              str_extract(sample_name, 'AuRM')
+          ),
+        .before = 1
+      )
+  ),
+  tar_target(
+  calibrated_large,
+    processed %>% signal_conc_calibration(
+      dens_comps = dens_comps_large,
+      RM_datafile = "008_RM",
+      RM_dia = 60,
+      supp_coef = 1/0.515
+    ) %>% dplyr::select(-c(
+      coef_b, density, element_fraction, dataset
+    ))
+    %>%
+      #adding groupings
+      mutate(
+        smpl_grp =
+          case_when(
+            str_detect(sample_name, '^F[[:digit:]]-[[:digit:]]\\w') ~
+              str_extract(sample_name, '^F[[:digit:]]-[[:digit:]]\\w'),
+            str_detect(sample_name, '^PrB') ~
+              str_extract(sample_name, '^PrB'),
+            str_detect(sample_name, 'AuRM') ~
+              str_extract(sample_name, 'AuRM')
+          ),
+        .before = 1
+      )
+  ),
+  #not included in paper
+    tar_target(
+     matrix_HMI_NOHMI_processed,
+     nParticle_finder_blocks("~/sp-data/210310_HMI_Au_SW_test2.b")
+   ),
+  tar_target(
+  matrix_HMI_NOHMI_pr_peak_info,
+  matrix_HMI_NOHMI_processed %>%
+    filter(
+      str_detect(sample_name, "RM"),
+      above_height_thr == TRUE
+    ) %>%
+    group_by(sample_name) %>%
+    distinct(peak_n, .keep_all = T) %>%
+    group_by(sample_name) %>% summarise(
+      mean_peak_area = mean(peak_area),
+      mean_peak_width = mean(peak_width),
+      mean_peak_height = mean(peak_max_I),
+      sd_peak_area = sd(peak_area),
+      sd_peak_width = sd(peak_width),
+      sd_peak_height = sd(peak_max_I),
+      n_peaks = n()
+    ) %>%
+    mutate(across(where(is.numeric), ~ round(.x, digits = 1)))
+),
+  # matrix effects
+  tar_target(
+    matrix_inbatch_processed,
+    nParticle_finder_blocks("~/sp-data/Fordefjorden/MATRIX")
+  ),
+  tar_target(
+    matrix_inbatch_processed_RFs,
+    matrix_inbatch_processed %>% signal_response_factor()
+  ),
+  tar_target(
+    matrix_inbatch_processed_peak_info,
+    matrix_inbatch_processed %>%
+      filter(str_detect(sample_name, "RM"),
+             above_height_thr == TRUE) %>%
+      group_by(sample_name) %>%
+      distinct(peak_n, .keep_all = T) %>%
+      group_by(sample_name) %>% summarise(
+        mean_peak_area = mean(peak_area),
+        mean_peak_width = mean(peak_width),
+        mean_peak_height = mean(peak_max_I),
+        sd_peak_area = sd(peak_area),
+        sd_peak_width = sd(peak_width),
+        sd_peak_height = sd(peak_max_I),
+        n_peaks = n()
+      ) %>%
+      mutate(across(is.numeric, ~ round(.x, digits = 1)))
+  ),
+  tar_target(size_dists,
+    tar_read(calibrated) %>%
+  filter(str_detect(sample_name, "\\dN"),
+         above_height_thr == TRUE) %>%
+  group_by(isotope, sample_name) %>%
+  distinct(peak_n, .keep_all = T) %>%
+  mutate(
+    depth = case_when(
+      str_detect(smpl_grp, '\\-2') ~ 200,
+      str_detect(smpl_grp, '\\-3') ~ 100,
+      str_detect(smpl_grp, '\\-4') ~ 50,
+      str_detect(smpl_grp, '\\-5') ~ 20,
+      str_detect(smpl_grp, '\\-6') ~ 10,
+      str_detect(smpl_grp, "F2\\-1") ~ 336,
+      str_detect(smpl_grp, "F4\\-1") ~ 530,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+          mutate(
+        measurement =
+          case_when(
+            str_detect(sample_name, '\\_m1') ~ 1,
+            str_detect(sample_name, '\\_m2') ~ 2,
+            str_detect(sample_name, '\\_m3') ~ 3,
+            TRUE ~ NA_real_
+          )
+      ) %>%
+      mutate(measurement = as.numeric(measurement)) %>%
+  mutate(station = case_when(
+    str_detect(smpl_grp, '^F2') ~ 'Inner',
+    str_detect(smpl_grp, '^F4') ~ 'Outer',
+    TRUE ~ NA_character_
+  )) %>% ungroup() %>% 
+  dplyr::select(isotope, station, depth, peak_mass, size_nm, measurement) 
+  ),
+  tar_target(size_dists_large,
+    tar_read(calibrated_large) %>%
+  filter(str_detect(sample_name, "\\dN"),
+         above_height_thr == TRUE) %>%
+  group_by(isotope, sample_name) %>%
+  distinct(peak_n, .keep_all = T) %>%
+  mutate(
+    depth = case_when(
+      str_detect(smpl_grp, '\\-2') ~ 200,
+      str_detect(smpl_grp, '\\-3') ~ 100,
+      str_detect(smpl_grp, '\\-4') ~ 50,
+      str_detect(smpl_grp, '\\-5') ~ 20,
+      str_detect(smpl_grp, '\\-6') ~ 10,
+      str_detect(smpl_grp, "F2\\-1") ~ 336,
+      str_detect(smpl_grp, "F4\\-1") ~ 530,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+          mutate(
+        measurement =
+          case_when(
+            str_detect(sample_name, '\\_m1') ~ 1,
+            str_detect(sample_name, '\\_m2') ~ 2,
+            str_detect(sample_name, '\\_m3') ~ 3,
+            TRUE ~ NA_real_
+          )
+      ) %>%
+      mutate(measurement = as.numeric(measurement)) %>%
+  mutate(station = case_when(
+    str_detect(smpl_grp, '^F2') ~ 'Inner',
+    str_detect(smpl_grp, '^F4') ~ 'Outer',
+    TRUE ~ NA_character_
+  )) %>% ungroup() %>% 
+  dplyr::select(isotope, station, depth, peak_mass, size_nm, measurement) 
+  )
+)
+```
+
+
+```{targets ctd_met, tar_simple = TRUE}
+
+    ctd_met <-
+      read_excel(path = '~/Documents/GitHub/fordefjorden_distribution/files_imgs/total_metals.xlsx', range = 'A11:BV47') %>%
+      rename_with(~ str_replace_all(
+        .x,
+        pattern = c(
+          "(?<=[a-z])(?=[A-Z])|[\\-\\s(./]+" = "_",
+          "[\\[\\])]" = ""
+        )
+      )) %>% slice(c(-1:-5, -8)) %>%  mutate(across(4:74,
+                                                    ~ as.numeric(.x))) %>%
+      filter(str_detect(Sample_ID, '^F[2|4]|LOD|Mean')) %>%
+      rename(smpl_grp = Sample_ID) %>%
+      pivot_longer(
+        cols = c(4:74),
+        names_to = 'isotope',
+        values_to = 'Total_metal_ppb'
+      ) %>%
+      mutate(
+        Total_metal_ug_l = as.numeric(Total_metal_ppb),
+        Total_metal_ppb = NULL
+      ) %>%
+      mutate(smpl_grp = str_replace_all(smpl_grp, '0', '')) %>% # add depth groupings
+      mutate(
+        depth = case_when(
+          str_detect(smpl_grp, '\\-2') ~ 200,
+          str_detect(smpl_grp, '\\-3') ~ 100,
+          str_detect(smpl_grp, '\\-4') ~ 50,
+          str_detect(smpl_grp, '\\-5') ~ 20,
+          str_detect(smpl_grp, '\\-6') ~ 10,
+          smpl_grp == 'F2-1' ~ 336,
+          smpl_grp == 'F4-1' ~ 530,
+          TRUE ~ NA_real_
+        )
+      ) %>% # add station groupings
+      mutate(
+        station = case_when(
+          str_detect(smpl_grp, '^F2') ~ 'Inner',
+          str_detect(smpl_grp, '^F4') ~ 'Outer',
+          TRUE ~ NA_character_
+        )
+      )
+    
+    #retrieve LOD to add to facets
+    LOD_total_met <-
+      ctd_met %>% filter(smpl_grp == 'LOD') %>% dplyr::select(isotope, Total_metal_ug_l) %>% filter(str_detect(isotope, 'Al|Mn|Fe|Pb|Ti|Si'))
+    
+    ctd_met <- ctd_met %>% # mean blank subtraction
+      group_by(isotope) %>%
+      mutate(Total_metal_ug_l = Total_metal_ug_l - Total_metal_ug_l[smpl_grp == 'Mean']) %>%
+      filter(str_detect(isotope, 'Al|Mn|Fe|Pb|Ti|Si'))
+
+```
+
+
+```{targets summarized, tar_simple = TRUE}
+smpl_regex <-
+  '^F[[:digit:]]-[[:digit:]]\\w'#"^[^_]{1,5}_" #to recognize sample grouping
+blk_regex <-
+  '^PrB' #regex to recognize blanks for LOD/LOQ + mean blk subtr.
+rm_regex <- "AuRM"
+
+F_sum <- tar_read(calibrated) %>%
+               nParticle_summariser(acq_time = 60)%>%
+  dplyr::select(-density) %>%
+  mutate(
+    smpl_grp =
+      case_when(
+        str_detect(sample_name, smpl_regex) ~
+          str_extract(sample_name, smpl_regex),
+        str_detect(sample_name, blk_regex) ~
+          str_extract(sample_name, blk_regex),
+        str_detect(sample_name, rm_regex) ~
+          str_extract(sample_name, rm_regex),
+        str_detect(sample_name, "\\d{1,3}[A-Z]{1}[a-z]{1}") &
+          str_detect(sample_name, "[A-Z]{1}[a-z]{1}") ~
+          "ion_std"),
+    .before = 1
+  ) %>%
+  
+  mutate(measurement =
+           case_when(
+             str_detect(sample_name, '\\_m1') ~ 1,
+             str_detect(sample_name, '\\_m2') ~ 2,
+             str_detect(sample_name, '\\_m3') ~ 3,
+             TRUE ~ NA_real_
+           )) %>%
+  mutate(measurement = as.numeric(measurement)) %>%
+  mutate(
+    sampling = case_when(
+      smpl_grp %>% str_detect('\\-\\dN') ~ 'Neutral',
+      smpl_grp %>% str_detect('\\-\\dA') ~ 'Acidified',
+      smpl_grp %>% str_detect(blk_regex) ~ 'Blk',
+      TRUE ~ NA_character_
+    )
+  ) %>% # add depth groupings
+  mutate(
+    depth = case_when(
+      str_detect(smpl_grp, '\\-2') ~ 200,
+      str_detect(smpl_grp, '\\-3') ~ 100,
+      str_detect(smpl_grp, '\\-4') ~ 50,
+      str_detect(smpl_grp, '\\-5') ~ 20,
+      str_detect(smpl_grp, '\\-6') ~ 10,
+      str_detect(smpl_grp, "F2\\-1") ~ 336,
+      str_detect(smpl_grp, "F4\\-1") ~ 530,
+      TRUE ~ NA_real_
+    )
+  ) %>% # add location groupings
+  mutate(station = case_when(
+    str_detect(smpl_grp, '^F2') ~ 'Inner',
+    str_detect(smpl_grp, '^F4') ~ 'Outer',
+    TRUE ~ NA_character_
+  ))
+
+LODs <- F_sum %>% filter(str_detect(sample_name, blk_regex)) %>% group_by(isotope) %>%
+  summarise(
+    mass_conc_LOD = mean(mass_conc) + 3*sd(mass_conc),
+    n_particles_LOD = PoiCI(mean(n_particles), 1-0.003),
+    particle_conc_LOD = n_particles_LOD/(0.346*10^(-3)*mean(TE)),
+    )
+
+F_sum <- left_join(F_sum, LODs, by = "isotope") %>%
+  filter(!(isotope == "Fe" & str_detect(sample_name, "F2-6N_m2")))
+  
+```
+
+
+```{targets tables}
+# pvalues sampling protocol
+list(
+  tar_target(
+    sampling_influence_nparticles,
+    summarized %>%
+      filter(str_detect(sampling, "Acidified|Neutral"),
+             depth >= 200) %>%
+      mutate(
+        depth = case_when(
+          depth >= 336 ~ "bottom",
+          depth == 200 ~ "middle",
+          depth == 100 ~ "high-middle"
+        ),
+        depth = recode_factor(
+          depth,
+          "high-middle" = "high-middle",
+          "middle" = "middle",
+          "bottom" = "bottom"
+        ),
+        .ordered = TRUE
+      ) %>%
+      group_by(isotope) %>%
+      nest() %>%
+      mutate(model = map(data, nparticle_glm_nparticles)) %>%
+      # glance gets the model summary variables
+      mutate(
+        glance = map(model, broom::glance),
+        # rsq = glance %>% map_dbl("r.squared"),
+        # tidy gets summary variables of the model coefficients
+        tidy = map(model, broom::tidy, exponentiate = TRUE),
+        # augment gets per observation variables (e.g., residuals)
+        augment = map(model, broom::augment)
+      ) %>% unnest(tidy) %>% filter(str_detect(term,"samplingNeutral")) %>%
+      dplyr::select(isotope, p.value)
+  )
+)
+```
+
+```{targets plots}
+list(
+tar_target(map_fordefjorden,{
+  get_stamenmap(
+    center = c(5.430, 4.986),
+    maptype = 'terrain',
+    bbox = c(
+      left = 4.84,
+      bottom = 61.4,
+      right = 6.06,
+      top = 61.63
+    )
+  ) %>% 
+    
+    ggmap() +
+    geom_point(data = tibble(
+      locations = c('inner', 'outer', 'mine'),
+      locs = c('Inner','Outer', 'Mine'),
+      lon = c(5.430, 4.986, 5.446),
+      lat = c(61.480, 61.568, 61.488)
+    ) %>% filter(locs != 'Mine'),
+    aes(x = lon, y = lat),
+    size = 5,
+    color = 'blue',
+    shape = 18) +
+    geom_point(data = tibble(
+      locations = c('inner', 'outer', 'mine'),
+      locs = c('Inner','Outer', 'Mine'),
+      lon = c(5.430, 4.986, 5.446),
+      lat = c(61.480, 61.568, 61.488)
+    ) %>% filter(locs == 'Mine'),
+    aes(x = lon, y = lat),
+    size = 3,
+    shape = 17) +
+    geom_shadowtext(
+      data = tibble(
+        locations = c('inner', 'outer', 'mine'),
+        locs = c('Inner','Outer', 'Planned mine'),
+        lon = c(5.428, 4.988, 5.500),
+        # lon = c(5.430, 4.986, 5.446),
+        lat = c(61.468, 61.557, 61.496)
+      ),
+      aes(label = locs),
+      color = 'black',
+      bg.color = "white",
+      nudge_x = 0.05,
+      size = 3
+    )+theme_bw()+labs(x="Longitude [°E]",y="Latitude [°N]")+
+    scale_x_continuous(breaks = seq(4.7, 6.2, 0.1),
+                       limits = c(4.9, 6.0))
+}),
+
+tar_target(sampling_protocol,
+           tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer")) %>% 
+  mutate(measurement = as_factor(measurement)) %>% 
+  ggplot(aes(
+    x = depth,
+    y = n_particles,
+    color = sampling,
+    shape = measurement
+  )) +
+  labs(y = '# particles') +
+  geom_hline(
+    aes(yintercept = n_particles_LOD),
+    alpha = .35,
+    linetype = 'twodash') +
+  geom_point(size = 1.5, alpha = 0.85) +
+  geom_line(linetype = 'dotted') +
+  labs(x = 'Depth below surface [m]', y = 'Number of particle events detected [#]') +
+  scale_x_reverse()+
+  coord_flip()+
+  facet_grid(station ~ isotope, scales = "free") +
+    mytheme+
+  labs(shape = "Measurement:",
+       color = "Sampling:")+
+  scale_color_manual(values = c("#FA0808", "navyblue"))+
+  scale_y_continuous(label = ~ scales::comma(.x, accuracy = 1))
+),
+
+tar_target(sizes_plot,
+           tar_read(calibrated) %>%
+  filter(str_detect(sample_name, "\\dN"),
+         above_height_thr == TRUE,
+         str_detect(sample_name, "F4")) %>%
+  group_by(isotope, sample_name) %>%
+  distinct(peak_n, .keep_all = T) %>%
+  ggplot(aes(size_nm)) +
+  geom_histogram(breaks = 5 * c(1:120)) + facet_grid(isotope ~ smpl_grp, scales = "free"))
+)
+```
+
+
+```{targets tot_metals_plot, tar_simple = TRUE}
+
+ctd_met <- read_excel(path = '~/Documents/GitHub/fordefjorden_distribution/files_imgs/total_metals.xlsx', range ='A11:BV47') %>% 
+  rename_with(
+    ~ str_replace_all(.x,
+                      pattern = c(
+                        "(?<=[a-z])(?=[A-Z])|[\\-\\s(./]+" = "_",
+                        "[\\[\\])]" = "")
+    )) %>% slice(c(-1:-5,-8)) %>%  mutate(
+  across(4:74,
+         ~ as.numeric(.x))
+) %>% {. ->> ctd_met_full} %>% 
+  filter(str_detect(Sample_ID,'^F[2|4]|LOD|Mean')
+         ) %>% 
+  rename(
+    smpl_grp = Sample_ID
+  ) %>% 
+  pivot_longer(
+    cols = c(4:74),
+    names_to = 'isotope',
+    values_to = 'Total_metal_ppb'
+    ) %>%
+  mutate(
+    Total_metal_ug_l = as.numeric(Total_metal_ppb),
+    Total_metal_ppb = NULL
+  ) %>%
+  mutate(smpl_grp = str_replace_all(smpl_grp,'0','')
+         ) %>%# add depth groupings
+  mutate(
+    depth = case_when(
+      str_detect(smpl_grp,'\\-2') ~ 200,
+      str_detect(smpl_grp,'\\-3') ~ 100,
+      str_detect(smpl_grp,'\\-4') ~ 50,
+      str_detect(smpl_grp,'\\-5') ~ 20,
+      str_detect(smpl_grp,'\\-6') ~ 10,
+      smpl_grp == 'F2-1' ~ 336,
+      smpl_grp == 'F4-1' ~ 530,
+      TRUE ~ NA_real_
+    )
+  ) %>% # add station groupings
+  mutate(
+    station = case_when(
+      str_detect(smpl_grp, '^F2') ~ 'Inner',
+      str_detect(smpl_grp, '^F4') ~ 'Outer',
+      TRUE ~ NA_character_
+    )
+  )
+
+#retrieve LOD to add to facets
+LOD_total_met <- ctd_met %>% filter(smpl_grp == 'LOD') %>% dplyr::select(isotope, Total_metal_ug_l) %>% filter(str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si'))
+
+ctd_met <- ctd_met %>% # mean blank subtraction
+  group_by(isotope) %>% 
+  mutate(
+    Total_metal_ug_l = Total_metal_ug_l-Total_metal_ug_l[smpl_grp == 'Mean']
+  )%>% 
+  filter(str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si'))
+
+ctd_met %>%
+  filter(
+    str_detect(station, "Inner|Outer")
+  ) %>%
+  ggplot(aes(x = depth, y = Total_metal_ug_l)) +
+  geom_line(color = "black", linetype = "dotted", ) +
+  geom_point(color = "black") +
+  geom_hline(
+    data = LOD_total_met,
+    aes(yintercept = Total_metal_ug_l), linetype = "twodash", alpha=0.35
+  ) +
+  facet_grid(station ~ isotope, scales = "free") +
+  scale_color_gradient(low = "yellow", high = "red") +
+  labs(y = expression(paste("Total mass concentration [", mu, "g/L]", sep = "")), x = "Depth below surface [m]") +
+  mytheme+
+  scale_x_reverse() +
+  coord_flip()+
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1),
+    legend.position = "top"
+  )
+```
+
+
+```{targets tot_met_vs_sp, tar_simple = TRUE}
+
+tot_met_filter <- ctd_met %>% filter(station == "Inner" | station == "Outer",
+                 str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si')) %>%
+  dplyr::select(!c("smpl_grp", "Lab_ID", "Unknown"))
+
+F_sum_filter <- tar_read(summarized) %>% filter(station == "Inner" | station == "Outer",
+                 str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si'),
+                 sampling == "Neutral",
+                 measurement == 1) %>% dplyr::select(mass_conc, station, depth, isotope, measurement) %>% 
+  dplyr::select(-measurement) %>% distinct(.keep_all = TRUE)
+
+F_sum_tot_met <- inner_join(F_sum_filter,tot_met_filter )
+
+F_sum_tot_met %>% filter(str_detect(isotope, "Fe|Al|Mn|Si")) %>% 
+  ggplot(aes(Total_metal_ug_l, mass_conc))+
+  geom_point(aes(color=depth), size = 1.6)+
+  
+  geom_smooth(method = "lm", formula = y ~ x + 0)+
+  scale_color_gradient(low = 'black', high='lightblue', trans = "reverse",guide = guide_colourbar(#reverse = TRUE,
+                                                                                                  frame.colour = "black"))+
+  labs(y = 'Particle mass concentration [ng/L]', x = expression(paste("Total mass concentration [", mu, "g/L]", sep = ""))) +
+  geom_path(size = 0.3)+
+  theme(axis.text.x = element_text(angle = 90, hjust=1))+
+  facet_grid2(station~isotope, scales = 'free', independent = "y")+
+  labs(colour = "Depth:")+
+  mytheme+
+  theme(legend.position = "right")
+```
+
+```{r targets-make, include = FALSE}
+tar_make()
+# Gives info on diagnostics if errors, but will print package info etc...
+```
+
+```{r plots-output}
+
+#Fordefjorden map
+tar_read(map_fordefjorden)
+ggsave(filename = "out/fig1-map-fordefjorden.tiff", width = 15, height = 10, device='tiff', dpi=300, units = "cm")
+
+
+```
+
+# RESULTS & DISCUSSION
+
+## Influence of sampling protocol
+
+```{r read-sampling-protocol, fig.cap = "Shown is the number of detected particle events of the elements subject to quantification."}
+#influence of sampling protocol
+tar_read(sampling_protocol)
+ggsave(filename = "out/fig2-sampling-protocol.tiff", width = 15, height = 10, device='tiff', dpi=300, units = "cm")
+```
+
+
+## Survey of inorganic NPs and trace elements
+
+```{r total-metals-plot, fig.cap = "Total metals plot."}
+#total metals
+tar_read(tot_metals_plot)
+ggsave(filename = "out/fig3-total-metals.tiff", width = 15, height = 10, device='tiff', dpi=300, units = "cm")
+
+```
+
+
+```{r plot-particle-mass-concentrations, fig.cap = "Particulate mass concentrations."}
+tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer"),
+                 sampling == "Neutral",
+                 measurement == 1) %>% 
+  mutate(depth = as.numeric(depth),
+         ) %>% 
+  ggplot(aes(
+    x = depth,
+    y = mass_conc
+  )) +
+  labs(y = 'Particle mass concentration [ng/L]', x = 'Depth below surface [m]') +
+  geom_hline(
+    aes(yintercept = mass_conc_LOD),
+    alpha = .35,
+    linetype = 'twodash'
+  ) +
+  geom_point(size = 2, alpha = 0.65) +
+  geom_line(linetype = 'dotted')+
+  coord_flip()+
+  facet_grid(station ~ isotope, scales = "free") +#, scales = 'free') +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+                                   axis.text=element_text(size=rel(0.7)))+
+  scale_x_reverse()
+#   scale_y_continuous(labels = function(y) 
+#   parse(text=gsub("e\\+", " %*% 10^", scales::scientific_format()(y)))
+# )
+
+ggsave(filename = "out/fig4-particle-mass-concentrations.tiff", width = 15, height = 8, device='tiff', dpi=300, units = "cm")
+```
+    
+```{r read-total-metal-vs-sp-plot}
+tar_read(tot_met_vs_sp)
+ggsave(filename = "out/fig5-tot-met-vs-sp.tiff", width = 15, height = 8, device='tiff', dpi=300, units = "cm")
+```
+
+
+```{r mass-conc-table}
+tar_read(summarized) %>% filter(depth >= 0,
+                                measurement == 1,
+                                sampling == "Neutral") %>%
+  group_by(isotope, station, depth) %>%
+  dplyr::select(isotope, station, depth, mass_conc) %>%
+  pivot_wider(names_from = isotope, values_from = mass_conc) %>%
+  arrange(station, depth) %>% ungroup() %>% 
+  dplyr::select(depth, Al, Fe, Mn, Pb, Si, Ti) %>%
+  # mutate(station = paste(station, "station")) %>%
+  mutate(across(where(is.numeric), ~ round(.x, digits = 0))) %>%
+  mutate(depth = paste(depth, " m")) %>% 
+  kable() %>%
+  kableExtra::group_rows("Inner station", 1, 6) %>%
+  kableExtra::group_rows("Outer station", 7, 11)
+
+```
+
+
+```{r size-distributions, eval = FALSE}
+# not included
+tar_read(size_dists) %>%
+  filter(depth >= 200) %>% 
+  mutate(
+        depth = case_when(
+            depth >= 336 ~ "bottom",
+            depth == 200 ~ "200 m",
+        ),
+        depth = recode_factor(depth,
+                              "200 m" = "200 m","bottom" = "bottom"),
+        .ordered = TRUE
+    ) %>%
+  mutate(peak_mass_fg = peak_mass/10^(-18)) %>% 
+  
+  ggplot(aes(x=size_nm, y=isotope, height = ..count..)) +
+
+  xlim(0,1000)+
+  # geom_histogram(breaks = 5 * c(1:120)) +
+  geom_density_ridges2(stat = "binline", binwidth = 10, scale = 0.95, draw_baseline = FALSE)+
+  facet_grid(depth ~ station , scales = "free")
+
+```
+
+```{r mass-distributions}
+size_dists <- tar_read(size_dists) %>% cbind(tar_read(size_dists_large) %>% select(size_nm) %>% rename(c("size_nm_l" = "size_nm"))) %>% 
+  mutate(peak_mass_fg = peak_mass/10^(-18)) %>%
+  mutate(depth = as.character(depth),
+        depth = if_else(depth >= 336, "bottom", depth))
+
+size_dists_minmax <- size_dists %>% group_by(isotope) %>% 
+  summarise(min_nm = min(size_nm),
+            max_nm = max(size_nm),
+            min_nm_l = min(size_nm_l),
+            max_nm_l = max(size_nm_l),
+            med_nm_l = median(size_nm_l))
+
+size_dists %>%
+  ggplot(aes(x = isotope, y = peak_mass_fg)) +
+  scale_y_continuous(trans = "log10") +
+  geom_violindot(
+    fill_dots = "black",
+    color_dots = "black",
+    size_dots = 0.2,
+    scale = "count", fill = "grey",
+    width = 1.55, binwidth = 0.05
+  ) +
+  labs(x = "Element", y = "Particle mass [fg]") +
+  geom_text(
+    data = size_dists %>%
+      group_by(isotope) %>%
+      mutate(n_nps = n()) %>%
+      filter(size_nm == quantile(size_nm, 0.997, type = 1)),
+    aes(label = paste("n = ", n_nps, sep = ""), hjust = 0, vjust = 0, angle = 90), nudge_x = -0.07,
+    size = 2.3
+  ) +
+  geom_text(
+    data = size_dists %>%
+      group_by(isotope) %>%
+      mutate(n_nps = n()) %>%
+      filter(size_nm_l %in% quantile(size_nm_l,
+        c(0, 1),
+        type = 1
+      )) %>% distinct(size_nm_l, .keep_all = TRUE),
+    aes(
+      label = paste("", size_nm_l %>%
+        round(digits = 0), " nm", sep = ""),
+      hjust = 0,
+      vjust = 1,
+      angle = 0,
+      check_overlap = TRUE
+    ),
+    nudge_x = 0.05,
+    nudge_y = -0.02,
+    size = 2.3,
+    color = "black",
+    direction = c("x")
+  ) + theme_bw()
+
+ggsave(filename = "out/fig6-mass-distributions.tiff", width = 15, height = 8, device = "tiff", dpi = 300, units = "cm")
+
+# Check if comparable if smallest particles filtered away (Such that comparable size LOD)
+# size_dists %>%
+#   group_by(isotope) %>%
+#   filter(
+#     str_detect(isotope, "Al|Si"),
+#     station == "Outer",
+#     depth == "bottom"
+#   ) %>% filter(size_nm_l > 500, size_nm_l < 1500) %>% group_by(isotope) %>% 
+#   summarise(count = n()) %>% 
+#   View()
+```
+
+# SUPPLEMENTARY
+
+## Particle number concentrations
+
+```{r plot-particle-number-concentrations, fig.cap = "Particle concentrations"}
+tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer"),
+                 sampling == "Neutral") %>% 
+  mutate(measurement = as_factor(measurement)) %>%
+  mutate(depth = as.numeric(depth),
+         ) %>% 
+  ggplot(aes(
+    x = depth,
+    y = particle_conc,
+    shape = measurement
+  )) +
+  labs(y = 'Particle number concentration [#/L]', x = 'Depth below surface [m]') +
+  geom_hline(
+    aes(yintercept = n_particles_LOD*particle_conc/n_particles),
+    alpha = .35,
+    linetype = 'twodash'
+  ) +
+  geom_point(size = 1.5, alpha = 0.65, aes(shape = measurement)) +
+  geom_line(linetype = 'dotted')+
+  coord_flip()+
+  facet_grid(station ~ isotope, scales = 'free') +
+  mytheme +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  scale_x_reverse()+
+  scale_y_continuous(labels = function(y) 
+  parse(text=gsub("e\\+", " %*% 10^", scales::scientific_format()(y)))
+)+
+  labs(shape = "Measurement:")
+
+ggsave(filename = "out/si-fig3-particle-number-concentrations.tiff", width = 15, height = 10, device='tiff', dpi=300, units = "cm")
+
+
+```
+
+
+## CTD data
+
+```{r si-ctd-data}
+
+ctds_raw <- c("~/Documents/GitHub/fordefjorden_distribution/files_imgs/204473_F2.txt",
+              "~/Documents/GitHub/fordefjorden_distribution/files_imgs/204473_F4.txt") %>%
+map(
+    ~ .x %>%
+      read_delim(delim = ',') %>%
+      mutate(dataset = str_extract(.x, '\\w\\d(?=\\.txt)'), .before = 1) %>%
+      mutate(
+        across(-1,
+      ~ as.numeric(.x)
+    )
+  ) %>%
+    mutate(dataset = if_else(dataset == "F2", "Inner", "Outer" ))
+) %>%
+  bind_rows() %>% rename(Temperature = 4)
+
+ctds_raw %>% dplyr::select(Salinity, dataset) %>% group_by(dataset) %>%
+  summarise(
+    mean = mean(Salinity),
+    max = max(Salinity),
+    min = min(Salinity)
+  ) %>% kable(caption = 'Salinities vs depth')
+
+
+ctds_raw %>%
+  ggplot(aes(Depth,Salinity))+
+  geom_point(aes(color = Temperature))+
+  facet_wrap(~dataset)+theme_bw()+
+  labs(x = "Depth [m]", y = "Salinity [‰]", color = "Temp. [°C]")+
+  theme(legend.position = "right")+
+  scale_color_gradient(guide = guide_colourbar(
+    frame.colour = "black"
+  ))
+
+ggsave(filename = "out/si-ctd-salinity-temp.tiff", width = 14, height = 8, device='tiff', dpi=300, units = "cm")
+
+```
+
+## River discharge
+
+```{r river-discharge}
+discharge_Jolstra <-
+  'files_imgs/84.21.0-Vannføring-dogn-v1.csv' %>%
+  read_delim(delim = ';',
+             skip = 1,
+             locale = locale(decimal_mark = ',')) %>%
+  mutate(river = 'Jolstra')
+
+discharge_Nausta <-
+  'files_imgs/84.11.0-Vannføring-dogn-v2.csv' %>%
+  read_delim(delim = ';',
+             skip = 1,
+             locale = locale(decimal_mark = ',')) %>%
+  mutate(river = 'Nausta')
+
+discharge_Fordefjorden <- bind_rows(discharge_Jolstra,discharge_Nausta) %>%
+  rename(discharge_m3_s = 'Vannføring (m³/s)', time_date = 'Tidspunkt') %>%
+  mutate(time_date = as.Date(time_date))
+
+discharge_Fordefjorden %>% group_by(river) %>% drop_na() %>%
+  summarise(
+    meanDischarge = mean(discharge_m3_s[time_date >= '2018-10-19'] , na.rm = TRUE) %>% round(digits = 0),
+    last3daysDischarge = mean(discharge_m3_s[time_date >= '2020-10-19' &
+                                               time_date <= '2020-10-21'], na.rm = TRUE) %>% round(digits = 0)
+  ) %>% 
+  # write_excel_csv2(file = "Nausta discharge.csv")
+  kable(caption = 'source: sildre.nve.no') %>% kable_styling()
+```
+
+
+## Statistics
+
+### Sampling protocol
+
+```{r regression-coefficients-sampling}
+# SAMPLING
+tar_read(summarized) %>%
+    filter(str_detect(sampling, "Acidified|Neutral"),
+           depth >= 200) %>%
+    mutate(
+        depth = case_when(
+            depth >= 336 ~ "bottom",
+            depth == 200 ~ "middle",
+            depth == 100 ~ "high-middle"
+        ),
+        depth = recode_factor(
+            depth,
+            "high-middle" = "high-middle",
+            "middle" = "middle",
+            "bottom" = "bottom"
+        ),
+        .ordered = TRUE
+    ) %>%
+    group_by(isotope) %>%
+    nest() %>%
+    mutate(model = map(data, nparticle_glm_nparticles)) %>%
+    # glance gets the model summary variables
+    mutate(
+        glance = map(model, broom::glance),
+        # rsq = glance %>% map_dbl("r.squared"),
+        # tidy gets summary variables of the model coefficients
+        tidy = map(model, broom::tidy, exponentiate = TRUE),
+        # augment gets per observation variables (e.g., residuals)
+        augment = map(model, broom::augment)
+    ) %>% unnest(tidy) %>% 
+  
+  
+  filter(str_detect(term,"sampl")) %>%
+  
+  dplyr::select(isotope, estimate, p.value) %>%
+  kable(caption = "P-values corresponding to a null hypothesis of there being no difference in the number of particles detected between the neutral and acidified sampling protocols, correcting for the time between measurements, depth and station.")
+
+```
+
+### Measurement
+
+```{r regression-coefficients-measurement}
+# MEASUREMENT/ TIME
+
+tar_read(summarized) %>%
+    filter(str_detect(sampling, "Acidified|Neutral"),
+           depth >= 200) %>%
+    mutate(
+        depth = case_when(
+            depth >= 336 ~ "bottom",
+            depth == 200 ~ "middle",
+            depth == 100 ~ "high-middle"
+        ),
+        depth = recode_factor(
+            depth,
+            "high-middle" = "high-middle",
+            "middle" = "middle",
+            "bottom" = "bottom"
+        ),
+        .ordered = TRUE
+    ) %>%
+    group_by(isotope) %>%
+    nest() %>%
+    mutate(model = map(data, nparticle_glm_nparticles)) %>%
+    # glance gets the model summary variables
+    mutate(
+        glance = map(model, broom::glance),
+        # rsq = glance %>% map_dbl("r.squared"),
+        # tidy gets summary variables of the model coefficients
+        tidy = map(model, broom::tidy, exponentiate = TRUE),
+        # augment gets per observation variables (e.g., residuals)
+        augment = map(model, broom::augment)
+    ) %>% unnest(tidy) %>% filter(str_detect(term,"measurement")) %>% dplyr::select(isotope, p.value) %>%
+  kable(caption = "p.values for the time dependecy for each isotope.")
+
+```
+
+### Station
+
+```{r regression-coefficients-station}
+# STATION
+tar_read(summarized) %>%
+    filter(str_detect(sampling, "Acidified|Neutral"),
+           depth >= 200) %>%
+    mutate(
+        depth = case_when(
+            depth >= 336 ~ "bottom",
+            depth == 200 ~ "middle",
+            depth == 100 ~ "high-middle"
+        ),
+        depth = recode_factor(
+            depth,
+            "high-middle" = "high-middle",
+            "middle" = "middle",
+            "bottom" = "bottom"
+        ),
+        .ordered = TRUE
+    ) %>%
+    group_by(isotope) %>%
+    nest() %>%
+    mutate(model = map(data, nparticle_glm_nparticles)) %>%
+    # glance gets the model summary variables
+    mutate(
+        glance = map(model, broom::glance),
+        # rsq = glance %>% map_dbl("r.squared"),
+        # tidy gets summary variables of the model coefficients
+        tidy = map(model, broom::tidy, exponentiate = TRUE),
+        # augment gets per observation variables (e.g., residuals)
+        augment = map(model, broom::augment)
+    ) %>% unnest(tidy) %>% filter(str_detect(term,"station")) %>% 
+
+dplyr::select(isotope, p.value) %>%
+  kable(caption = "p.values for station for each isotope.")
+
+```
+
+### Model validation
+
+```{r model-validation}
+
+validation <- tar_read(summarized) %>%
+    filter(str_detect(sampling, "Acidified|Neutral"),
+           depth >= 200) %>%
+    mutate(
+        depth = case_when(
+            depth >= 336 ~ "bottom",
+            depth == 200 ~ "middle",
+            depth == 100 ~ "high-middle"
+        ),
+        depth = recode_factor(
+            depth,
+            "high-middle" = "high-middle",
+            "middle" = "middle",
+            "bottom" = "bottom"
+        ),
+        .ordered = TRUE
+    )
+
+validation_al <- validation %>% filter(isotope == "Ti")
+
+# Fe OK.
+# Al Ok
+# Mn: OK: some quantile dev.
+# Si OK
+# Pb OK
+# Ti quantile deviation
+
+model_al <- nparticle_glm_nparticles(validation_al)
+
+simulationOutput <- simulateResiduals(fittedModel = model_al, plot = T, n = 1000)
+```
+
+### Various parameters
+
+```{r visualization-testing}
+# 
+# tar_read(summarized) %>%
+#     filter(str_detect(sampling, "Acidified|Neutral"),
+#            depth >= 200) %>%
+#     mutate(
+#         depth = case_when(
+#             depth >= 336 ~ "bottom",
+#             depth == 200 ~ "middle",
+#             depth == 100 ~ "high-middle"
+#         ),
+#         depth = recode_factor(
+#             depth,
+#             "high-middle" = "high-middle",
+#             "middle" = "middle",
+#             "bottom" = "bottom"
+#         ),
+#         .ordered = TRUE
+#     ) %>%
+#     group_by(isotope) %>%
+#     nest() %>%
+#     mutate(model = map(data, nparticle_glm_nparticles)) %>%
+#     # glance gets the model summary variables
+#     mutate(
+#         glance = map(model, broom::glance),
+#         # rsq = glance %>% map_dbl("r.squared"),
+#         # tidy gets summary variables of the model coefficients
+#         tidy = map(model, broom::tidy, exponentiate = TRUE),
+#         # augment gets per observation variables (e.g., residuals)
+#         augment = map(model, broom::augment)
+#     ) %>% unnest(tidy) %>% #filter(str_detect(term,"sampl")) %>% 
+#   dplyr::select(isotope, p.value, term)
+
+```
+
+## Technical and methodological considerations for single particle analysis
+
+### Au matrix suppression/ enhancement
+
+```{r in-batch-matrix-fx, fig.cap = "Integrated peak intensities and peak shape parameters demonstrating the matrix effects on Au particulate signals. RX gas used."}
+tar_read(matrix_inbatch_processed_peak_info) %>%  mutate(
+    mean_peak_area = paste(mean_peak_area, "±", sd_peak_area),
+    mean_peak_width = paste(mean_peak_width, "±",sd_peak_width),
+    mean_peak_height = paste(mean_peak_height,"±", sd_peak_height),
+    .keep = "unused"
+  ) %>% 
+  kable() %>% kable_styling()
+```
+
+
+```{r peak-shapes-inbatch, fig.cap = "Superpositions of all Au NP peaks using the highest intensity dwell as the reference point in UPW, seawater and acidified seawater. Shaded areas represent the standard deviation, dots represent individual datapoints."}
+tar_read(matrix_inbatch_processed) %>%
+  filter(str_detect(sample_name, "RM")) %>%
+  mutate(
+    sample_name = case_when(
+      sample_name == "AuRM500ng/LA" ~ "Acidified seawater",
+      sample_name == "AuRM500ng/LM" ~ "Ultrapure water",
+      sample_name == "AuRM500ng/LN" ~ "Neutral seawater",
+    ),
+    sample_name = factor(
+      sample_name,
+      levels = c("Ultrapure water", "Neutral seawater", "Acidified seawater")
+    )
+  ) %>%
+  filter(str_detect(sample_name, "Acidified|Neutral|Ultrapure")) %>%
+  peakshaper_wrapper(peak_width = 30) %>%
+  peakshape_plotter() +
+  geom_point(
+    data = tar_read(matrix_inbatch_processed) %>% filter(str_detect(sample_name, "RM")) %>%
+      mutate(
+        sample_name = case_when(
+          sample_name == "AuRM500ng/LA" ~ "Acidified seawater",
+          sample_name == "AuRM500ng/LM" ~ "Ultrapure water",
+          sample_name == "AuRM500ng/LN" ~ "Neutral seawater",
+        ),
+        sample_name = factor(
+          sample_name,
+          levels = c("Ultrapure water", "Neutral seawater", "Acidified seawater")
+        )
+      ) %>%
+      filter(str_detect(
+        sample_name, "Ultrapure|Neutral|Acidified"
+      )) %>%
+      peakshaper_wrapper(peak_width = 30),
+    aes(x = rel_pos, y = counts),
+    size = 0.5,
+    alpha = 0.01,
+    shape = 16,
+    position = "jitter"
+  ) + coord_cartesian(ylim = c(0, 20)) +
+  scale_fill_manual(values = c("darkorchid", "navyblue", "red")) +
+  theme_bw() +
+  labs(y = "Intensity [counts]", x = expression(paste(
+    "Time relative peak maximum [x100 ", mu, "s]", sep = ""
+  ))) +
+  theme(legend.position = "none")
+
+ggsave(filename = "out/si-fig2-peak-shapes-inbatch.tiff", width = 10, height = 6, device='tiff', dpi=300, units = "cm")
+
+```
+
+### HMI vs no-HMI
+
+```{r peak-shapes-HMI-noHMI}
+tar_read(matrix_HMI_NOHMI_processed) %>%
+  filter(str_detect(sample_name, "Au RM 100")) %>%
+  peakshaper_wrapper(peak_width = 30) %>%
+  peakshape_plotter() +
+  geom_point(
+    data = tar_read(matrix_HMI_NOHMI_processed) %>%
+      filter(str_detect(sample_name, "Au RM 100")) %>% peakshaper_wrapper(peak_width = 30),
+    aes(x = rel_pos, y = counts),
+    size = 0.5,
+    alpha = 0.01,
+    shape = 16,
+    position = "jitter"
+  ) +
+  coord_cartesian(ylim = c(0, 100)) +
+  scale_fill_manual(values = c("yellow", "darkorchid")) +
+  theme_bw() +
+  labs(y = "Intensity [counts]", x = expression(paste(
+    "Time relative peak maximum [x100 ", mu, "s]", sep = ""
+  ))) +
+  theme(legend.position = "none")
+
+# ggsave(filename = "out/peak-shapes-hmi-nohmi.tiff", width = 10, height = 6, device='tiff', dpi=300, units = "cm")
+
+```
+
+
+```{r HMI-NOHMI-PEAKS, fig.cap = "NO HMI vs HMI in single batch, same settings, no RX gas."}
+tar_read(matrix_HMI_NOHMI_pr_peak_info) %>%
+  mutate(
+    mean_peak_area = paste(mean_peak_area, "±", sd_peak_area),
+    mean_peak_width = paste(mean_peak_width, "±",sd_peak_width),
+    mean_peak_height = paste(mean_peak_height,"±", sd_peak_height),
+    .keep = "unused"
+  ) %>% 
+  kable() %>% kable_styling()
+
+```
+
+## Table summarized data
+
+```{r}
+tar_read(summarized) %>%
+  filter(depth > 0, sampling == "Neutral") %>%
+  select(
+    isotope,
+    station,
+    depth,
+    mass_conc,
+    n_particles,
+    particle_conc,
+    particle_conc_LOD
+  ) %>% 
+  mutate(particle_conc = particle_conc %>% round(digits = 0),
+         particle_conc_LOD = particle_conc_LOD %>% round(digits = 0),
+         mass_conc = mass_conc %>% round(digits = 1)) %>%
+  rename(c("# particles" = n_particles,
+           "mass conc." = mass_conc,
+           "particle conc." = particle_conc,
+           "particle conc. LOD" = particle_conc_LOD)) %>%
+  arrange(station,isotope, depth) %>% 
+write_excel_csv(file = "files_imgs/summarized.csv")
+```
+
+## False positives simulation
+
+```{r}
+# Simulation of false positives ####
+
+set.seed(123)
+
+#Poisson noise, mean+3sigma threshold
+
+false_signal_simulator <- function(mean, dwells) {
+  as_tibble(seq(0, dwells - 1, by = 1)) %>%
+    mutate(mean = mean,
+      counts = rpois(dwells, lambda = mean)) %>% select(-value)
+}
+
+
+pois_plot_3s <- future_map_dfr((seq(0.05, 20, by = 0.05)),
+               ~ false_signal_simulator(mean = .x, dwells = 600000) %>%
+                 group_by(mean)
+               %>% summarize(false_positives = sum(counts > mean(counts) + 3 *
+                                                     sd(counts))),
+               .options = furrr_options(seed = TRUE)
+) %>%
+  ggplot(aes(mean, false_positives)) +
+  geom_line() +
+  geom_hline(yintercept = (1-pnorm(3))*600000, color = 'red', linetype = "dotted")+
+  scale_y_continuous(labels = function(y) 
+    parse(text=gsub("e\\+", " %*% 10^", scales::scientific_format()(y))),
+    limits = c(0, 30000))+
+  labs(title = "Poisson noise",
+       subtitle = "Mean + 3 x sigma threshold",
+       x = "Mean baseline [counts]",
+       y = "False positives per minute [#]")+
+  theme_bw()
+
+
+# Gaussian noise, mean+3sigma threshold
+
+false_signal_simulator_norm <- function(mean, dwells) {
+  as_tibble(seq(0, dwells - 1, by = 1)) %>%
+    mutate(mean = mean,
+           counts = rnorm(dwells, mean = mean, sd = sqrt(mean))) %>% select(-value)
+}
+
+gaus_plot_3s <- future_map_dfr((seq(0.05, 20, by = 0.05)),
+               ~ false_signal_simulator_norm(mean = .x, dwells = 600000) %>%
+                 group_by(mean)
+               %>% summarize(false_positives = sum(counts > mean(counts) + 3 *
+                                                     sd(counts))),
+               .options = furrr_options(seed = TRUE)
+) %>% ggplot(aes(mean, false_positives)) +
+  geom_line()+
+  scale_y_continuous(labels = function(y) 
+    parse(text=gsub("e\\+", " %*% 10^", scales::scientific_format()(y))),
+    limits = c(0, 30000))+
+  geom_hline(yintercept = 600000*(1-pnorm(3)), color = 'red', linetype = "dotted")+
+  #Chebyshev's thm is twosided. A Gaussian distribution it is symmertric and we can divide by two to get the one-sided probability.
+  labs(title = "Gaussian noise",
+       subtitle = "Mean + 3 x sigma threshold",
+       x = "Mean baseline [counts]",
+       y = "False positives per minute [#]")+
+  theme_bw()
+
+
+
+#Poisson noise, mean+5sigma threshold
+
+false_signal_simulator <- function(mean, dwells) {
+  as_tibble(seq(0, dwells - 1, by = 1)) %>%
+    mutate(mean = mean,
+           counts = rpois(dwells, lambda = mean)) %>% select(-value)
+}
+
+
+pois_plot_5s <- future_map_dfr((seq(0.05, 20, by = 0.05)),
+                               ~ false_signal_simulator(mean = .x, dwells = 600000) %>%
+                                 group_by(mean)
+                               %>% summarize(false_positives = sum(counts > mean(counts) + 5 *
+                                                                     sd(counts))),
+                               .options = furrr_options(seed = TRUE)
+) %>%
+  ggplot(aes(mean, false_positives)) +
+  geom_line() +
+  geom_hline(yintercept = (1-pnorm(5))*600000, color = 'red', linetype = "dotted")+
+  scale_y_continuous(labels = function(y) 
+    parse(text=gsub("e\\+", " %*% 10^", scales::scientific_format()(y))),
+    limits = c(0, 3000))+
+  #Chebyshev's thm is twosided.
+  labs(title = "Poisson noise",
+       subtitle = "Mean + 5 x sigma threshold",
+       x = "Mean baseline [counts]",
+       y = "False positives per minute [#]")+
+  theme_bw()
+
+
+# Gaussian noise, mean+3sigma threshold
+
+false_signal_simulator_norm <- function(mean, dwells) {
+  as_tibble(seq(0, dwells - 1, by = 1)) %>%
+    mutate(mean = mean,
+           counts = rnorm(dwells, mean = mean, sd = sqrt(mean))) %>% select(-value)
+}
+
+gaus_plot_5s <- future_map_dfr((seq(0.05, 20, by = 0.05)),
+                               ~ false_signal_simulator_norm(mean = .x, dwells = 600000) %>%
+                                 group_by(mean)
+                               %>% summarize(false_positives = sum(counts > mean(counts) + 5 *
+                                                                     sd(counts))),
+                               .options = furrr_options(seed = TRUE)
+) %>% ggplot(aes(mean, false_positives)) +
+  geom_line()+
+  scale_y_continuous(labels = function(y) 
+    parse(text=gsub("e\\+", " %*% 10^", scales::scientific_format()(y))),
+    limits = c(0, 3000))+
+  geom_hline(yintercept = 600000*(1-pnorm(5)), color = 'red', linetype = "dotted")+
+  labs(title = "Gaussian noise",
+       subtitle = "Mean + 5 x sigma threshold",
+       x = "Mean baseline [counts]",
+       y = "False positives per minute [#]")+
+  theme_bw()
+
+gc(verbose = FALSE) #clean up RAM
+
+(pois_plot_3s+gaus_plot_3s)/(pois_plot_5s + gaus_plot_5s)
+
+ggsave(
+  filename = "out/si-fig4-false-positives.tiff",
+  width = 15,
+  height = 15,
+  device = 'tiff',
+  dpi = 300,
+  units = "cm"
+)
+```
