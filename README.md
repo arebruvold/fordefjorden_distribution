@@ -23,3 +23,8 @@ Small datasets (total metals, SEM-EDS) are included in this repository or in the
 Code and scripts are for now under a Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0) license.
 
 Other data are subject to copyright and may not be used without permission.
+
+
+
+[![DOI](https://zenodo.org/badge/461511652.svg)](https://zenodo.org/badge/latestdoi/461511652)
+
