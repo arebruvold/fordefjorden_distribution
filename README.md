@@ -17,7 +17,7 @@ For automated calibration, ionic standards must be named appropriately:
 - Multiple isotopes per element not supported as of now.
 
 ## Raw data available
-Small datasets (total metals, SEM-EDS) are included, whereas the SP-ICP-MS data is available on Zenodo *INSERT LINK*.
+Small datasets (total metals, SEM-EDS) are included in this repository or in the supplementary of the publication, whereas the SP-ICP-MS data is available on Zenodo, doi: 10.5281/zenodo.6187221.
 
 ## License
 Code and scripts are for now under a Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0) license.
