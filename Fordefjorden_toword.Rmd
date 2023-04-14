@@ -1,5 +1,5 @@
 ---
-title: "Distribution of nanoparticles and trace elements in a Norwegian fjord"
+title: "Distribution of inorganic nanoparticles and trace elements in a Norwegian fjord"
 output:
   bookdown::pdf_document2:
     latex_engine: xelatex
@@ -56,6 +56,7 @@ filter <- dplyr::filter
 #densities and compositions
 dens_comps_large <- read_csv("files_imgs/dens_comps_large.csv")
 dens_comps_small <- read_csv("files_imgs/dens_comps_small.csv")
+dens_comps_revision3 <- read_csv("files_imgs/dens_comps_revision3.csv") %>% select(3:5)
 
 ```
 
@@ -111,6 +112,7 @@ filter <- dplyr::filter
 
 dens_comps_large <- read_csv("files_imgs/dens_comps_large.csv")
 dens_comps_small <- read_csv("files_imgs/dens_comps_small.csv")
+dens_comps_revision3 <- read_csv("files_imgs/dens_comps_revision3.csv") %>% select(3:5)
 ```
 
 
@@ -212,7 +214,7 @@ list(
   tar_target(
   calibrated_large,
     processed %>% signal_conc_calibration(
-      dens_comps = dens_comps_large,
+      dens_comps = dens_comps_revision3,
       RM_datafile = "008_RM",
       RM_dia = 60,
       supp_coef = 1/0.515
@@ -355,63 +357,93 @@ list(
     TRUE ~ NA_character_
   )) %>% ungroup() %>% 
   dplyr::select(isotope, station, depth, peak_mass, size_nm, measurement) 
-  )
+  ),
+tar_target(
+  signal_response_factors, signal_response_factor(tar_read(processed))
+)
 )
 ```
 
 
-```{targets ctd_met, tar_simple = TRUE}
+```{targets tot_met}
 
-    ctd_met <-
-      read_excel(path = '~/Documents/GitHub/fordefjorden_distribution/files_imgs/total_metals.xlsx', range = 'A11:BV47') %>%
-      rename_with(~ str_replace_all(
-        .x,
-        pattern = c(
-          "(?<=[a-z])(?=[A-Z])|[\\-\\s(./]+" = "_",
-          "[\\[\\])]" = ""
+list(
+  tar_target(ctd_met_unsubtracted, {
+    ctd_met_re <- read_excel(path = "~/Documents/GitHub/fordefjorden_distribution/files_imgs/total_metals.xlsx", range = "A11:BQ44") %>%
+      rename_with(
+        ~ str_replace_all(.x,
+          pattern = c(
+            "(?<=[a-z])(?=[A-Z])|[\\-\\s(./]+" = "_",
+            "[\\[\\])]" = ""
+          )
         )
-      )) %>% slice(c(-1:-5, -8)) %>%  mutate(across(4:74,
-                                                    ~ as.numeric(.x))) %>%
-      filter(str_detect(Sample_ID, '^F[2|4]|LOD|Mean')) %>%
-      rename(smpl_grp = Sample_ID) %>%
-      pivot_longer(
-        cols = c(4:74),
-        names_to = 'isotope',
-        values_to = 'Total_metal_ppb'
+      ) %>%
+      {
+        . ->> ctd_met_re_full
+      } %>%
+      # remove replicate analysis at start of sequence and the subsample reanalyzed for QC:
+      filter(
+        !str_detect(Sample_ID, "F4-1A"),
+        !row_number() %in% c(5, 6)
       ) %>%
       mutate(
-        Total_metal_ug_l = as.numeric(Total_metal_ppb),
-        Total_metal_ppb = NULL
+        across(
+          4:69,
+          ~ as.numeric(.x)
+        )
       ) %>%
-      mutate(smpl_grp = str_replace_all(smpl_grp, '0', '')) %>% # add depth groupings
+      filter(str_detect(Sample_ID, "^F[2|4]|M|LOD")) %>%
+      rename(
+        smpl_grp = Sample_ID
+      ) %>%
+      pivot_longer(
+        cols = c(4:69),
+        names_to = "isotope",
+        values_to = "Total_metal_ug_l"
+      ) %>%
+      mutate(smpl_grp = str_replace_all(smpl_grp, "0", "")) %>% # add depth groupings
       mutate(
         depth = case_when(
-          str_detect(smpl_grp, '\\-2') ~ 200,
-          str_detect(smpl_grp, '\\-3') ~ 100,
-          str_detect(smpl_grp, '\\-4') ~ 50,
-          str_detect(smpl_grp, '\\-5') ~ 20,
-          str_detect(smpl_grp, '\\-6') ~ 10,
-          smpl_grp == 'F2-1' ~ 336,
-          smpl_grp == 'F4-1' ~ 530,
+          str_detect(smpl_grp, "\\-2") ~ 200,
+          str_detect(smpl_grp, "\\-3") ~ 100,
+          str_detect(smpl_grp, "\\-4") ~ 50,
+          str_detect(smpl_grp, "\\-5") ~ 20,
+          str_detect(smpl_grp, "\\-6") ~ 10,
+          str_detect(smpl_grp, "F2-1") ~ 336,
+          str_detect(smpl_grp, "F4-1") ~ 530,
           TRUE ~ NA_real_
         )
       ) %>% # add station groupings
       mutate(
         station = case_when(
-          str_detect(smpl_grp, '^F2') ~ 'Inner',
-          str_detect(smpl_grp, '^F4') ~ 'Outer',
+          str_detect(smpl_grp, "^F2") ~ "Inner",
+          str_detect(smpl_grp, "^F4") ~ "Outer",
           TRUE ~ NA_character_
         )
       )
-    
-    #retrieve LOD to add to facets
-    LOD_total_met <-
-      ctd_met %>% filter(smpl_grp == 'LOD') %>% dplyr::select(isotope, Total_metal_ug_l) %>% filter(str_detect(isotope, 'Al|Mn|Fe|Pb|Ti|Si'))
-    
-    ctd_met <- ctd_met %>% # mean blank subtraction
+  }),
+  tar_target(LOD_ctd_met, {
+    LOD_ctd_met <- ctd_met_unsubtracted %>%
+      filter(smpl_grp == "LOD") %>%
+      dplyr::select(isotope, Total_metal_ug_l) %>%
+      filter(str_detect(isotope, "Al|Mn|Fe|Si|Pb|Ti"))
+  }),
+  tar_target(ctd_met, {
+    ctd_met <- ctd_met_unsubtracted %>% # mean blank subtraction
       group_by(isotope) %>%
-      mutate(Total_metal_ug_l = Total_metal_ug_l - Total_metal_ug_l[smpl_grp == 'Mean']) %>%
-      filter(str_detect(isotope, 'Al|Mn|Fe|Pb|Ti|Si'))
+      mutate(
+        Total_metal_ug_l = Total_metal_ug_l - Total_metal_ug_l[smpl_grp == "M"]
+      ) %>%
+      filter(str_detect(isotope, "Al|Mn|Fe|Si|Pb|Ti")) %>%
+      select(-Enhet) %>%
+      group_by(smpl_grp, isotope, station, depth) %>%
+        group_by(smpl_grp, isotope) %>% 
+  mutate(replicate = row_number())
+  })
+)
+
+
+
 
 ```
 
@@ -530,13 +562,13 @@ list(
 ```{targets plots}
 list(
 tar_target(map_fordefjorden,{
-  get_stamenmap(
+    get_stamenmap(
     center = c(5.430, 4.986),
     maptype = 'terrain',
     bbox = c(
-      left = 4.84,
+      left = 4.83,
       bottom = 61.4,
-      right = 6.06,
+      right = 6.46,
       top = 61.63
     )
   ) %>% 
@@ -565,7 +597,7 @@ tar_target(map_fordefjorden,{
       data = tibble(
         locations = c('inner', 'outer', 'mine'),
         locs = c('Inner','Outer', 'Planned mine'),
-        lon = c(5.428, 4.988, 5.500),
+        lon = c(5.438, 4.998, 5.520),
         # lon = c(5.430, 4.986, 5.446),
         lat = c(61.468, 61.557, 61.496)
       ),
@@ -575,9 +607,47 @@ tar_target(map_fordefjorden,{
       nudge_x = 0.05,
       size = 3
     )+theme_bw()+labs(x="Longitude [°E]",y="Latitude [°N]")+
-    scale_x_continuous(breaks = seq(4.7, 6.2, 0.1),
-                       limits = c(4.9, 6.0))
+    scale_x_continuous(breaks = seq(4.7, 6.3, 0.1),
+                       limits = c(4.9, 6.3))
 }),
+tar_target(map_overview,
+           
+  get_stamenmap(
+    center = c(5.430, 4.986),
+    maptype = "terrain-background",
+    zoom = 4,
+    bbox = c(
+      left = 0,
+      bottom = 57.5,
+      right = 26,
+      top = 71
+    )
+  ) %>%
+    ggmap() + theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "transparent"), # bg of the panel
+    plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+    legend.background = element_rect(fill = "transparent"), # get rid of legend bg
+    legend.box.background = element_rect(fill = "transparent"), # get rid of legend panel bg
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x=element_blank(),
+    axis.title.y=element_blank(),
+    axis.text.x = element_blank(),
+    panel.grid.major = element_line(
+      size = 0.1, linetype = "solid",
+      colour = "grey"
+    ),
+    panel.grid.minor = element_line(
+      size = 0.05, linetype = "dotted",
+      colour = "grey"
+    ),
+    strip.background = element_rect(
+      color = "black", fill = "grey", linetype = "solid"
+    ),
+    strip.text.x = element_text(size = 9, colour = "black"),
+    strip.text.y = element_text(size = 9, colour = "black")
+  )),
 
 tar_target(sampling_protocol,
            tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer")) %>% 
@@ -594,7 +664,7 @@ tar_target(sampling_protocol,
     alpha = .35,
     linetype = 'twodash') +
   geom_point(size = 1.5, alpha = 0.85) +
-  geom_line(linetype = 'dotted') +
+  geom_line(linetype = 'dashed') +
   labs(x = 'Depth below surface [m]', y = 'Number of particle events detected [#]') +
   scale_x_reverse()+
   coord_flip()+
@@ -618,75 +688,22 @@ tar_target(sizes_plot,
 )
 ```
 
+  
 
 ```{targets tot_metals_plot, tar_simple = TRUE}
 
-ctd_met <- read_excel(path = '~/Documents/GitHub/fordefjorden_distribution/files_imgs/total_metals.xlsx', range ='A11:BV47') %>% 
-  rename_with(
-    ~ str_replace_all(.x,
-                      pattern = c(
-                        "(?<=[a-z])(?=[A-Z])|[\\-\\s(./]+" = "_",
-                        "[\\[\\])]" = "")
-    )) %>% slice(c(-1:-5,-8)) %>%  mutate(
-  across(4:74,
-         ~ as.numeric(.x))
-) %>% {. ->> ctd_met_full} %>% 
-  filter(str_detect(Sample_ID,'^F[2|4]|LOD|Mean')
-         ) %>% 
-  rename(
-    smpl_grp = Sample_ID
-  ) %>% 
-  pivot_longer(
-    cols = c(4:74),
-    names_to = 'isotope',
-    values_to = 'Total_metal_ppb'
-    ) %>%
-  mutate(
-    Total_metal_ug_l = as.numeric(Total_metal_ppb),
-    Total_metal_ppb = NULL
-  ) %>%
-  mutate(smpl_grp = str_replace_all(smpl_grp,'0','')
-         ) %>%# add depth groupings
-  mutate(
-    depth = case_when(
-      str_detect(smpl_grp,'\\-2') ~ 200,
-      str_detect(smpl_grp,'\\-3') ~ 100,
-      str_detect(smpl_grp,'\\-4') ~ 50,
-      str_detect(smpl_grp,'\\-5') ~ 20,
-      str_detect(smpl_grp,'\\-6') ~ 10,
-      smpl_grp == 'F2-1' ~ 336,
-      smpl_grp == 'F4-1' ~ 530,
-      TRUE ~ NA_real_
-    )
-  ) %>% # add station groupings
-  mutate(
-    station = case_when(
-      str_detect(smpl_grp, '^F2') ~ 'Inner',
-      str_detect(smpl_grp, '^F4') ~ 'Outer',
-      TRUE ~ NA_character_
-    )
-  )
-
-#retrieve LOD to add to facets
-LOD_total_met <- ctd_met %>% filter(smpl_grp == 'LOD') %>% dplyr::select(isotope, Total_metal_ug_l) %>% filter(str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si'))
-
-ctd_met <- ctd_met %>% # mean blank subtraction
-  group_by(isotope) %>% 
-  mutate(
-    Total_metal_ug_l = Total_metal_ug_l-Total_metal_ug_l[smpl_grp == 'Mean']
-  )%>% 
-  filter(str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si'))
-
-ctd_met %>%
+tar_read(ctd_met) %>%
   filter(
     str_detect(station, "Inner|Outer")
   ) %>%
   ggplot(aes(x = depth, y = Total_metal_ug_l)) +
-  geom_line(color = "black", linetype = "dotted", ) +
-  geom_point(color = "black") +
+  # geom_line(color = "black", linetype = "dotted", ) +
+  # geom_point(color = "black", size = 1.5, alpha = 0.75) +
+  stat_summary(fun = "mean", colour = "black", size = 0.5, geom = "line", linetype = "dashed")+
+    stat_summary(geom = "errorbar",fun.data = "mean_se", fun.args = list(mult = 1))+
   geom_hline(
-    data = LOD_total_met,
-    aes(yintercept = Total_metal_ug_l), linetype = "twodash", alpha=0.35
+    data = LOD_ctd_met,
+    aes(yintercept = Total_metal_ug_l), linetype = "twodash", alpha = 0.35
   ) +
   facet_grid(station ~ isotope, scales = "free") +
   scale_color_gradient(low = "yellow", high = "red") +
@@ -704,8 +721,7 @@ ctd_met %>%
 ```{targets tot_met_vs_sp, tar_simple = TRUE}
 
 tot_met_filter <- ctd_met %>% filter(station == "Inner" | station == "Outer",
-                 str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si')) %>%
-  dplyr::select(!c("smpl_grp", "Lab_ID", "Unknown"))
+                 str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si'))
 
 F_sum_filter <- tar_read(summarized) %>% filter(station == "Inner" | station == "Outer",
                  str_detect(isotope,'Al|Mn|Fe|Pb|Ti|Si'),
@@ -740,8 +756,13 @@ tar_make()
 
 #Fordefjorden map
 tar_read(map_fordefjorden)
-ggsave(filename = "out/fig1-map-fordefjorden.tiff", width = 15, height = 10, device='tiff', dpi=300, units = "cm")
+ggsave(filename = "out/fig1-map-fordefjorden.tiff", width = 15, height = 10, device='tiff', dpi=300, units = "cm",
+       bg = "transparent")
 
+#fordefjorden overview
+tar_read(map_overview)
+ggsave(filename = "out/fig0-map-overview.tiff", width = 4.35, height = 4.35, device='tiff', dpi=300, units = "cm",
+       bg = "transparent")
 
 ```
 
@@ -769,7 +790,8 @@ ggsave(filename = "out/fig3-total-metals.tiff", width = 15, height = 10, device=
 ```{r plot-particle-mass-concentrations, fig.cap = "Particulate mass concentrations."}
 tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer"),
                  sampling == "Neutral",
-                 measurement == 1) %>% 
+                 measurement == 1,
+                 str_detect(isotope, "Al|Fe|Mn|Si|Pb|Ti")) %>% 
   mutate(depth = as.numeric(depth),
          ) %>% 
   ggplot(aes(
@@ -782,8 +804,8 @@ tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer"),
     alpha = .35,
     linetype = 'twodash'
   ) +
-  geom_point(size = 2, alpha = 0.65) +
-  geom_line(linetype = 'dotted')+
+  geom_point(color = "black", size = 1.5, alpha = 0.75) +
+  geom_line(linetype = 'dashed')+
   coord_flip()+
   facet_grid(station ~ isotope, scales = "free") +#, scales = 'free') +
   theme_bw()+
@@ -794,7 +816,7 @@ tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer"),
 #   parse(text=gsub("e\\+", " %*% 10^", scales::scientific_format()(y)))
 # )
 
-ggsave(filename = "out/fig4-particle-mass-concentrations.tiff", width = 15, height = 8, device='tiff', dpi=300, units = "cm")
+ggsave(filename = "out/fig4-particle-mass-concentrations.tiff", width = 15, height = 9, device='tiff', dpi=300, units = "cm")
 ```
     
 ```{r read-total-metal-vs-sp-plot}
@@ -901,7 +923,7 @@ size_dists %>%
     direction = c("x")
   ) + theme_bw()
 
-ggsave(filename = "out/fig6-mass-distributions.tiff", width = 15, height = 8, device = "tiff", dpi = 300, units = "cm")
+ggsave(filename = "out/fig6-mass-distributions.tiff", width = 15, height = 7, device = "tiff", dpi = 300, units = "cm")
 
 # Check if comparable if smallest particles filtered away (Such that comparable size LOD)
 # size_dists %>%
@@ -916,6 +938,22 @@ ggsave(filename = "out/fig6-mass-distributions.tiff", width = 15, height = 8, de
 ```
 
 # SUPPLEMENTARY
+
+Birnessite for Mn.
+MnO2 element fraction: `r 54.938/(54.938+15.999*2)`
+density = 3
+
+Goethite for Fe:
+FeOOH element fraction = `r 55.845/(55.845+15.999*2+1.0078)`
+density = 3.3
+
+## Signal response factors
+
+```{r}
+tar_read(signal_response_factors) %>% distinct(isotope, .keep_all = TRUE) %>% select(isotope, coef_b, r2 ) %>% rename(response = coef_b) %>% gt() %>%  gtsave("out/signal_response_factors.docx")
+  
+```
+
 
 ## Particle number concentrations
 
@@ -937,7 +975,7 @@ tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer"),
     linetype = 'twodash'
   ) +
   geom_point(size = 1.5, alpha = 0.65, aes(shape = measurement)) +
-  geom_line(linetype = 'dotted')+
+  geom_line(linetype = 'dashed')+
   coord_flip()+
   facet_grid(station ~ isotope, scales = 'free') +
   mytheme +
@@ -948,7 +986,8 @@ tar_read(summarized) %>% filter(str_detect(station, "Inner|Outer"),
 )+
   labs(shape = "Measurement:")
 
-ggsave(filename = "out/si-fig3-particle-number-concentrations.tiff", width = 15, height = 10, device='tiff', dpi=300, units = "cm")
+ggsave(filename = "out/si-fig3-particle-number-concentrations.tiff", width = 15, height = 9, device='tiff', dpi=300, units = "cm")
+
 
 
 ```
@@ -1170,7 +1209,7 @@ validation <- tar_read(summarized) %>%
         .ordered = TRUE
     )
 
-validation_al <- validation %>% filter(isotope == "Ti")
+validation_al <- validation %>% filter(isotope == "Al")
 
 # Fe OK.
 # Al Ok

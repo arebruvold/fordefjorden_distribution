@@ -1,11 +1,11 @@
 ## README
-This repository contains all code and small datasets for reproducing all processed data and visualizations presented in the manuscript *Distribution of inorganic nanoparticles and trace elements in a Norwegian fjord*. This includes:
+This repository contains all code and small datasets for reproducing all processed data and visualizations presented in the manuscript [*Vertical distribution of inorganic nanoparticles in a Norwegian fjord*](https://doi.org/10.1016/j.marenvres.2023.105975),  This includes:
 * Processing SP-ICP-MS raw data
 * Statistics
 * Cluster analysis
 
 ## SP-ICP-MS data processing
-A major revision is planned in order to improve performance and user friendliness and will likely result in a separate manuscript. Raw data from Agilent is handled automatically, requires version 2021/07/20 of the script "SNPExportTimeScanFiles.icpms.script". Perkin Elmer and other spectrogram formats can also be treated with minor adjustments to the code.
+A major revision is planned in order to improve performance and user friendliness, the most current published version in the repository arebruvold/sp_development. Raw data from Agilent is handled automatically, requires version 2021/07/20 of the script "SNPExportTimeScanFiles.icpms.script". Perkin Elmer and other spectrogram formats can also be treated with minor adjustments to the code.
 
 For automated calibration, ionic standards must be named appropriately:
 - 100Ti50Si10Au is read as a mixture of 100 ppb Ti, 50 ppb Si, 10 ppb Au.
@@ -20,7 +20,7 @@ For automated calibration, ionic standards must be named appropriately:
 Small datasets (total metals, SEM-EDS) are included in this repository or in the supplementary of the publication, whereas the SP-ICP-MS data is available on Zenodo, doi: 10.5281/zenodo.6187221.
 
 ## License
-Code and scripts are for now under a Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0) license.
+Code and scripts are under a Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0) license.
 
 Other data are subject to copyright and may not be used without permission.
 
