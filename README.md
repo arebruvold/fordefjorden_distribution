@@ -1,7 +1,7 @@
 ## README
-This repository contains all code and small datasets for reproducing all processed data and visualizations presented in the manuscript [*Vertical distribution of inorganic nanoparticles in a Norwegian fjord*](https://doi.org/10.1016/j.marenvres.2023.105975),  This includes:
-* Processing SP-ICP-MS raw data
-* Statistics
+This repository contains all code and small datasets for reproducing all processed data and visualizations presented in the manuscript [*Vertical distribution of inorganic nanoparticles in a Norwegian fjord*](https://doi.org/10.1016/j.marenvres.2023.105975):
+* Processing of SP-ICP-MS raw data
+* Statistical analysis and visualizations
 * Cluster analysis
 
 ## SP-ICP-MS data processing
