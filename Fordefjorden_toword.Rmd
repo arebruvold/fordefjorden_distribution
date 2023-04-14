@@ -1,5 +1,5 @@
 ---
-title: "Distribution of inorganic nanoparticles and trace elements in a Norwegian fjord"
+title: "Vertical distribution of inorganic nanoparticles in a Norwegian fjord"
 output:
   bookdown::pdf_document2:
     latex_engine: xelatex
